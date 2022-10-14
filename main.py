@@ -5,6 +5,7 @@ from discord.utils import get
 from tinydb import TinyDB, Query
 import datetime
 import asyncio
+from PIL import Image, ImageDraw, ImageFont 
 
 intents = discord.Intents.all()
 
@@ -51,9 +52,9 @@ update_essitial_ids()
 
 @bot.command(name="get_started")
 async def get_started(ctx):
-    em = discord.Embed(title = "Добро пожаловать в Тот v0.0.1", description = "Следуйте этой инструкции для настройки бота под свой сервер!")
+    em = discord.Embed(title = "Добро пожаловать в Тот v0.1.2", description = "Следуйте этой инструкции для настройки бота под свой сервер!")
     em.add_field(name = "1", value = "Установите превественный канал командой $configure\_bot welcome\_channel ваш\_айди\_канала")
-    em.add_field(name = "2", value = "Установите канал для квестов командой $configure\_bot welcome\_channel ваш\_айди\_канала")
+    em.add_field(name = "2", value = "Установите канал для квестов командой $configure\_bot quest\_channel ваш\_айди\_канала")
     em.add_field(name = "3",value = "Создавайте свои квесты используя команду $create_quest")
     await ctx.send(embed = em)
 
@@ -125,13 +126,54 @@ async def send_quest(ctx, quest):
         delete_seconds = (datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S") - datetime.datetime.strptime(quest["send_time"], "%Y-%m-%d %H:%M:%S")).total_seconds()
     else:
         delete_seconds = None
-    await asyncio.sleep(int(send_seconds))
-    await bot.get_channel(essential_ids["quest_channel_id"]).send(f"Название: {quest['title']}", delete_after=delete_seconds)
-    await bot.get_channel(essential_ids["quest_channel_id"]).send(f"Награда: {quest['reward']}", delete_after=delete_seconds)
-    await bot.get_channel(essential_ids["quest_channel_id"]).send(f"Кол-во участников: {quest['people_limit']}", delete_after=delete_seconds)
-    await bot.get_channel(essential_ids["quest_channel_id"]).send(f"Описание: {quest['description']}", delete_after=delete_seconds)
-    await bot.get_channel(essential_ids["quest_channel_id"]).send(f"Будует удалено в: {quest['delete_time']}", delete_after=delete_seconds)
+        quest["delete_time"] = "Постоянное" 
+    #await asyncio.sleep(int(send_seconds))
+    #await bot.get_channel(essential_ids["quest_channel_id"]).send(f"Название: {quest['title']}", delete_after=delete_seconds)
+    #await bot.get_channel(essential_ids["quest_channel_id"]).send(f"Награда: {quest['reward']}", delete_after=delete_seconds)
+    #await bot.get_channel(essential_ids["quest_channel_id"]).send(f"Кол-во участников: {quest['people_limit']}", delete_after=delete_seconds)
+    #await bot.get_channel(essential_ids["quest_channel_id"]).send(f"Описание: {quest['description']}", delete_after=delete_seconds)
+    #await bot.get_channel(essential_ids["quest_channel_id"]).send(f"Будует удалено в: {quest['delete_time']}", delete_after=delete_seconds)
+    await create_quest_image(ctx, quest, delete_seconds);
 
+def add_eol(text, n):
+    result = ""
+    i = 0
+    while text != "":
+        if i >= len(text) and i < n:
+            result += text[:i]
+            break
+        elif i == n:
+            while text[i] != ' ':
+                i -= 1
+            result += text[:i] + "\n"
+            text = text[i+1:]
+            i = 0
+        i += 1
+    return result        
+
+async def create_quest_image(ctx, quest, delete_seconds):
+    myFont = ImageFont.truetype("OpenSans-Regular.ttf", 100)
+    img = Image.open('quest_template.png')
+    imgDraw = ImageDraw.Draw(img)
+    imgDraw.text((600, 400), quest["title"], fill=(244, 233, 205), font = myFont)
+    imgDraw.text((600, 850), add_eol(quest["description"], 46), fill=(244, 233, 205), spacing = 10,font = myFont)
+    if quest["people_limit"] == "inf":
+        imgDraw.text((550, 1850), "Для всех", fill=(244, 233, 205), font = ImageFont.truetype("OpenSans-Regular.ttf", 85))
+    else:
+        imgDraw.text((550, 1850), f"{quest['people_limit']}/{quest['people_limit']} игроков", fill=(244, 233, 205), font = ImageFont.truetype("OpenSans-Regular.ttf", 85))
+    imgDraw.text((1400, 1850), f"{quest['reward']} опыта", fill=(244, 233, 205), font = myFont)
+    if quest["delete_time"] == "Постоянное":
+        imgDraw.text((2400, 1850), f"{quest['delete_time']}", fill=(244, 233, 205), font = ImageFont.truetype("OpenSans-Regular.ttf", 85))
+    else:
+        quest_dt = datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S")
+        if(datetime.datetime.now().day == quest_dt.day):
+            imgDraw.text((2400, 1850), quest_dt.strftime("До %H:%M"), fill=(244, 233, 205), font = ImageFont.truetype("OpenSans-Regular.ttf", 85))
+        else:
+            imgDraw.text((2400, 1850), quest_dt.strftime("До %H:%M %d.%m"), fill=(244, 233, 205), font = ImageFont.truetype("OpenSans-Regular.ttf", 85))
+    img.save(f"quest_{last_quest_id}.png")
+    img = discord.File(f"quest_{last_quest_id}.png")
+    await bot.get_channel(essential_ids["quest_channel_id"]).send(file=img, delete_after=delete_seconds)
+    os.remove(f"quest_{last_quest_id}.png")
 
 @bot.event
 async def on_member_join(member):
