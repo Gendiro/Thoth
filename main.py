@@ -1,3 +1,4 @@
+import math
 import os
 import discord
 from discord.ext import commands
@@ -6,8 +7,6 @@ import datetime
 from PIL import Image, ImageDraw, ImageFont
 from cogs.help import Helper
 from table2ascii import table2ascii, PresetStyle
-
-# TODO level barrier roles: 10+ level, 20+ level, etc
 
 # Creates a bot (All intents just in case, help removed to be replaced by custom one)
 intents = discord.Intents.all()
@@ -24,19 +23,29 @@ if db.search(Query().type == "welcome_channel_id"):
 quest_channel_id = 0
 if db.search(Query().type == "quest_channel_id"):
     quest_channel_id = db.search(Query().type == "quest_channel_id")[0]["value"]
-# Level -> needed exp to level up dict, starts from 0
-levels = db.search(Query().type == "levels")[0]["values"] if db.search(Query().type == "levels") else 0
+titles = [
+    "Старейшина",
+    "Возносящийся в старейшины",
+    "Администратор",
+    "Премьер-секретарь",
+    "Советник",
+    "Посол",
+    "Бригадир",
+    "Инженер",
+    "Рейнджер",
+    "Рекрут",
+    "Кочевник"
+][::-1]
 
 
-# a decorator function to make command only accessible to quest keepers
-def quest_keeper_level(function):
-    async def wrapper(ctx):
-        keeper_role = discord.utils.get(ctx.guild.roles, name="Quest keeper")
-        if keeper_role in ctx.author.roles:
-            await function(ctx)
-        else:
-            await ctx.send("Извините, это команда только для квест киперов")
-    return wrapper
+# a checker for @commands.check to make command only accessible to quest keepers
+async def quest_keeper_level(ctx):
+    keeper_role = discord.utils.get(ctx.guild.roles, name="Quest keeper")
+    if keeper_role in ctx.author.roles:
+        return True
+    else:
+        await ctx.send("Извините, это команда только для квест киперов")
+        return False
 
 
 # loading additional modules in separate files
@@ -66,11 +75,41 @@ async def on_guild_join(guild):
 
 # added it just in case someone logins in while the bot is offline
 @bot.command(name="add_everyone")
-@quest_keeper_level
+@commands.check(quest_keeper_level)
 async def add_every_user(ctx):
     for member in ctx.guild.members:
         if member.id != bot.application_id:
             add_player_to_db(member.id)
+            stranger_role = discord.utils.get(member.guild.roles, name=titles[0])
+            await member.add_roles(stranger_role)
+
+
+async def give_player_xp(ctx, player, exp):
+    player_profile = db.search(Query().id == player.id)[0]
+    player_profile["exp"] += exp
+    while player_profile["exp"] >= player_profile["level"] * 5 + 5:
+        player_profile["exp"] -= player_profile["level"] * 5 + 5
+        player_profile["level"] += 1
+        if math.floor((player_profile["level"] - 1) / 10) != math.floor(player_profile["level"] / 10):
+            old_title_id = math.floor((player_profile["level"] - 1) / 10)
+            new_title_id = math.floor(player_profile["level"] / 10)
+            old_title = discord.utils.get(ctx.guild.roles, name=titles[old_title_id])
+            new_title = discord.utils.get(ctx.guild.roles, name=titles[new_title_id])
+            if old_title is None:
+                old_title = await ctx.guild.create_role(name=titles[old_title_id], hoist=True)
+            if new_title is None:
+                new_title = await ctx.guild.create_role(name=titles[new_title_id], hoist=True)
+            await player.remove_roles(old_title)
+            await player.add_roles(new_title)
+
+    db.update({"exp": player_profile["exp"], "level": player_profile["level"]}, Query().id == player.id)
+
+
+@bot.command(name="give_exp")
+@commands.check(quest_keeper_level)
+async def give_exp(ctx, player_name, exp):
+    player = discord.utils.get(ctx.guild.members, name=player_name)
+    await give_player_xp(ctx, player, int(exp))
 
 
 # Greats new players and adds them to db
@@ -78,19 +117,21 @@ async def add_every_user(ctx):
 async def on_member_join(member):
     if welcome_channel_id:
         await bot.get_channel(welcome_channel_id).send(f'Приветствуем <@{member.id}>')
+    stranger_role = discord.utils.get(member.guild.roles, name=titles[0])
+    await member.add_roles(stranger_role)
     add_player_to_db(member.id)
 
 
 # configure_bot group of commands
 @bot.group(name="configure_bot")
-@quest_keeper_level
+@commands.check(quest_keeper_level)
 async def configure_bot(ctx):
     if ctx.invoked_subcommand is None:
         await ctx.send('Такой configure_bot комманды не существует ...')
 
 
 @configure_bot.command()
-@quest_keeper_level
+@commands.check(quest_keeper_level)
 async def welcome_channel(ctx, welcome_channel_name):
     global welcome_channel_id
     channel = discord.utils.get(ctx.guild.channels, name=welcome_channel_name)
@@ -101,7 +142,7 @@ async def welcome_channel(ctx, welcome_channel_name):
 
 
 @configure_bot.command()
-@quest_keeper_level
+@commands.check(quest_keeper_level)
 async def quest_channel(ctx, quest_channel_name):
     global quest_channel_id
     channel = discord.utils.get(ctx.guild.channels, name=quest_channel_name)
@@ -110,29 +151,8 @@ async def quest_channel(ctx, quest_channel_name):
     await bot.get_channel(int(quest_channel_id)).send("Этот канал выбран как квестовый")
 
 
-@configure_bot.command()
-@quest_keeper_level
-async def levels_config(ctx):
-    global levels
-    db.remove(Query().type == "levels")
-    levels = {"type": "levels", "values": dict()}
-    await ctx.send("Введите название уровня и кол-во очков опыта для него через пробел или слово \"выход\": ")
-    msg = (await bot.wait_for('message')).content
-    count = 0
-    while msg != "выход":
-        title, exp = " ".join(msg.split()[:-1]), int(msg.split()[-1])
-        levels["values"][str(count)] = {
-            "title": title,
-            "exp": exp
-        }
-        msg = (await bot.wait_for('message')).content
-        count += 1
-    db.insert(levels)
-    levels = levels["values"]
-
-
 @bot.command(name="create_quest")
-@quest_keeper_level
+@commands.check(quest_keeper_level)
 async def create_quest(ctx):
     if not quest_channel_id:
         await ctx.send("Канал для квестов ещё не был выбран")
@@ -247,7 +267,7 @@ async def create_quest_image(ctx, quest, delete_seconds):
 
 # noinspection PyTypeChecker
 @bot.command(name="confirm_quest")
-@quest_keeper_level
+@commands.check(quest_keeper_level)
 async def confirm_quest(ctx, player_name, *, quest_title):
     keeper_role = discord.utils.get(ctx.guild.roles, name="Quest keeper")
     if not (keeper_role in ctx.author.roles):
@@ -265,13 +285,7 @@ async def confirm_quest(ctx, player_name, *, quest_title):
         return
     quest_data = quests[0]
     # No need to remove the quest here, we do it in the on_raw_reaction_remove anyway
-    levels_data = db.search(Query().type == "levels")[0]
-    player_profile["exp"] += quest_data["reward"]
-    if player_profile["exp"] >= levels_data["values"][str(player_profile["level"])]["exp"]:
-        player_profile["exp"] -= levels_data["values"][str(player_profile["level"])]["exp"]
-        player_profile["level"] += 1
-    db.remove(Query().id == player.id)
-    db.insert(player_profile)
+    await give_player_xp(ctx, player, quest_data["reward"])
     quest_channel_temp = await bot.fetch_channel(quest_channel_id)
     message = await quest_channel_temp.fetch_message(quest_data["id"])
     player_member = await bot.fetch_user(player_profile["id"])
@@ -321,36 +335,34 @@ async def on_raw_reaction_remove(payload):
 
 def get_board():
     players = db.search(Query().type == "player")
-    return sorted(players, key=lambda d: d['exp'] + sum(levels[str(k)]["exp"] for k in range(int(d['level']))))[::-1]
+    return sorted(players, key=lambda d: d['exp'] + (20 + 5 * (d['level'] - 2)) / 2 * (d['level'] - 1) + 5)[::-1]
 
 
 def calculate_player_rank(player_id):
     board = get_board()
     for i in range(len(board)):
         if board[i]["id"] == player_id:
-            return i + 1
+            return max(0, i - 2)
 
 
 @bot.command(name="leaderboard")
 async def leaderboard(ctx):
     board = get_board()
     prepared_board = []
-    for i in range(len(board)):
-        overall_experience = board[i]['exp'] + sum(levels[str(k)]["exp"] for k in range(int(board[i]['level'])))
+    for i in range(3, min(len(board), 13)):
         member = await ctx.guild.fetch_member(board[i]["id"])
         if member.nick:
             name = member.nick
         else:
             player = await bot.fetch_user(board[i]["id"])
             name = player.name
-        prepared_board.append([i + 1, name, overall_experience])
-    output = table2ascii(header=["Rank", "Name", "Experience"], body=prepared_board, style=PresetStyle.thin_compact)
+        prepared_board.append([i - 2, name, board[i]['exp'], board[i]['level']])
+    output = table2ascii(header=["Rank", "Name", "Level", "Exp"], body=prepared_board, style=PresetStyle.thin_compact)
     await ctx.send(f"```\n{output}\n```")
 
 
 @bot.command(name="profile")
 async def profile(ctx, other_name=""):
-    global levels
     author = ctx.author
     if other_name != "":
         keeper_role = discord.utils.get(ctx.guild.roles, name="Quest keeper")
@@ -379,17 +391,18 @@ async def profile(ctx, other_name=""):
         author_avatar = ctx.author.avatar
     embed = discord.Embed()
     embed.set_thumbnail(url=author_avatar)
-    embed.add_field(name="User: ", value=f"{author_name}")
-    embed.add_field(name="Current level", value=f"{author['level']+1}: {levels[str(author['level'])]['title']}")
-    embed.add_field(name="Current rank", value=f"{calculate_player_rank(author['id'])}")
-    embed.add_field(name="Current experience", value=f"{author['exp']}/{levels[str(author['level'])]['exp']}")
-    s = "No active quests"
+    embed.add_field(name="Пользователь: ", value=f"{author_name}")
+    embed.add_field(name="Уровень: ", value=f"{author['level']}")
+    embed.add_field(name="Звание: ", value=f"{titles[math.floor(author['level']/10)]}")
+    embed.add_field(name="Место в рейтинге: ", value=f"{calculate_player_rank(author['id'])}")
+    embed.add_field(name="Опыт: ", value=f"{author['exp']}/{author['level'] * 5 + 5}")
+    s = "Нет активных заданий"
     for quest_id in author["current_quests"]:
-        if s == "No active quests":
+        if s == "Нет активных заданий":
             s = ""
         quest_title = db.search(Query().id == quest_id)[0]["title"]
         s += f"{quest_title}\n"
-    embed.add_field(name="Active quests", value=s)
+    embed.add_field(name="Активные задания: ", value=s)
     await ctx.send(embed=embed)
 
 
