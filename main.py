@@ -1,14 +1,18 @@
 import math
 import os
+from asyncio import sleep
+
 import discord
 from discord.ext import commands
 from tinydb import TinyDB, Query
 import datetime
 from PIL import Image, ImageDraw, ImageFont
-from cogs.help import Helper
 from table2ascii import table2ascii, PresetStyle
+from ui_components import QuestTypeView, TimeDeltaView
+from cogs.help import Helper
 
 # Creates a bot (All intents just in case, help removed to be replaced by custom one)
+
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='$', intents=intents)
 bot.remove_command('help')
@@ -24,18 +28,18 @@ quest_channel_id = 0
 if db.search(Query().type == "quest_channel_id"):
     quest_channel_id = db.search(Query().type == "quest_channel_id")[0]["value"]
 titles = [
-    "Старейшина",
-    "Возносящийся в старейшины",
-    "Администратор",
-    "Премьер-секретарь",
-    "Советник",
-    "Посол",
-    "Бригадир",
-    "Инженер",
-    "Рейнджер",
-    "Рекрут",
-    "Кочевник"
-][::-1]
+             "Старейшина",
+             "Возносящийся в старейшины",
+             "Администратор",
+             "Премьер-секретарь",
+             "Советник",
+             "Посол",
+             "Бригадир",
+             "Инженер",
+             "Рейнджер",
+             "Рекрут",
+             "Кочевник"
+         ][::-1]
 
 
 # a checker for @commands.check to make command only accessible to quest keepers
@@ -161,33 +165,70 @@ async def create_quest(ctx):
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
 
-    await ctx.send("Введите название квеста: ")
-    title = (await bot.wait_for('message', check=check)).content
-    await ctx.send("Введите награду за квест: ")
-    reward = (await bot.wait_for('message', check=check)).content
+    quest_type_view = QuestTypeView()
+    view_message = await ctx.send(view=quest_type_view)
+    while not quest_type_view.get_value():
+        await sleep(0.25)
+    await view_message.delete()
+    type_of_quest = quest_type_view.get_value()
+    title_message = await ctx.send("Введите название квеста: ")
+    title_answer_message = await bot.wait_for('message', check=check)
+    title = title_answer_message.content
+    await title_message.delete()
+    await title_answer_message.delete()
+    reward_message = await ctx.send("Введите награду за квест: ")
+    reward_answer_message = await bot.wait_for('message', check=check)
+    reward = reward_answer_message.content
+    await reward_message.delete()
+    await reward_answer_message.delete()
     if not reward.isnumeric():
         await ctx.send("Ошибка: Опыт должен быть введен числом без допольнительных знаков")
         await ctx.send("Перезапустите создание квеста")
     reward = int(reward)
-    await ctx.send("Введите максимальное число участников(число или слово \"бесконечность\"): ")
-    people_limit = (await bot.wait_for('message', check=check)).content
+    people_limit_message = await ctx.send("Введите максимальное число участников(число или букву \"н\"): ")
+    people_limit_answer_message = await bot.wait_for('message', check=check)
+    people_limit = people_limit_answer_message.content
+    await people_limit_message.delete()
+    await people_limit_answer_message.delete()
     if people_limit.isnumeric():
         people_limit = int(people_limit)
-    elif people_limit == "бесконечность":
+    elif people_limit == "н":
         people_limit = None
     else:
-        await ctx.send("Ошибка: Число участников не число или слово \"бесконечность\"")
+        await ctx.send("Ошибка: Число участников не число или буква \"н\"")
         await ctx.send("Перезапустите создание квеста")
-    await ctx.send(
-        "Введите время отправки(В формате год-месяц-день час:минута:секунда с " +
-        "незначащими нулями, пример: 2022-10-13 23:00:04): ")
-    send_time = (await bot.wait_for('message', check=check)).content
-    await ctx.send("Введите время удаления(В том же формате что и вреия отправки) или слово \"бесконечность\": ")
-    delete_time = (await bot.wait_for('message', check=check)).content
-    if delete_time == "бесконечность":
-        delete_time = None
-    await ctx.send("Введите описание задания: ")
-    description = (await bot.wait_for('message', check=check)).content
+    send_time_view = TimeDeltaView()
+    send_time_message = await ctx.send("Выберите время отправки", view=send_time_view)
+    while not send_time_view.get_time_delta():
+        await sleep(0.25)
+    if send_time_view.get_time_delta() == "by hand":
+        by_hand_message = await ctx.send("Введите время в формете 2010-10-10 10:10:10")
+        by_hand_answer_message = await bot.wait_for('message', check=check)
+        send_time = by_hand_answer_message.content
+        await by_hand_message.delete()
+        await by_hand_answer_message.delete()
+    else:
+        send_time = (datetime.datetime.today() + send_time_view.get_time_delta()).strftime("%Y-%m-%d %H:%M:%S")
+    await send_time_message.delete()
+    delete_time_view = TimeDeltaView()
+    delete_time_message = await ctx.send("Выберите время удаления", view=delete_time_view)
+    while not delete_time_view.get_time_delta():
+        await sleep(0.25)
+    if delete_time_view.get_time_delta() == "by hand":
+        by_hand_message = await ctx.send("Введите время в формете 2010-10-10 10:10:10")
+        by_hand_answer_message = await bot.wait_for('message', check=check)
+        delete_time = by_hand_answer_message.content
+        await by_hand_message.delete()
+        await by_hand_answer_message.delete()
+    else:
+        delete_time = (datetime.datetime.strptime(send_time, "%Y-%m-%d %H:%M:%S")
+                       + delete_time_view.get_time_delta()).strftime("%Y-%m-%d %H:%M:%S")
+    await delete_time_message.delete()
+    description_message = await ctx.send("Введите описание задания: ")
+    description_answer_message = await bot.wait_for('message', check=check)
+    description = description_answer_message.content
+    await description_message.delete()
+    await description_answer_message.delete()
     result_quest = {
         "type": "quest",
         "title": title,
@@ -197,18 +238,20 @@ async def create_quest(ctx):
         "delete_time": delete_time,
         "description": description
     }
-    await send_quest(ctx, result_quest)
+    await ctx.message.delete()
+    print(result_quest)
+    await send_quest(ctx, result_quest, type_of_quest)
 
 
-async def send_quest(ctx, quest):
+async def send_quest(ctx, quest, type_of_quest):
     if quest["delete_time"] is not None:
         delete_seconds = (
                 datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S") - datetime.datetime.strptime(
-                                            quest["send_time"], "%Y-%m-%d %H:%M:%S")).total_seconds()
+            quest["send_time"], "%Y-%m-%d %H:%M:%S")).total_seconds()
     else:
         delete_seconds = None
         quest["delete_time"] = "Постоянное"
-    await create_quest_image(ctx, quest, delete_seconds)
+    await create_quest_image(ctx, quest, delete_seconds, type_of_quest)
 
 
 def add_eol(text, n):
@@ -221,39 +264,44 @@ def add_eol(text, n):
         elif i == n:
             while text[i] != ' ':
                 i -= 1
-            result += text[:i] + "\n"
+            result += text[:i] + "\n.. "
             text = text[i + 1:]
             i = 0
         i += 1
     return result
 
 
-async def create_quest_image(ctx, quest, delete_seconds):
+async def create_quest_image(ctx, quest, delete_seconds, type_of_quest):
     # printing only to turn off the "unused parameter warning"
     print(ctx.author)
-    my_font = ImageFont.truetype("OpenSans-Regular.ttf", 100)
-    img = Image.open('quest_template.png')
+    my_font = ImageFont.truetype("font.ttf", 100)
+    img = None
+    match type_of_quest:
+        case "Дейлик":
+            img = Image.open('daily_quest_template')
+        case "Обычный":
+            img = Image.open('regular_quest_template')
+        case "Ивент":
+            img = Image.open('event_quest_template')
     img_draw = ImageDraw.Draw(img)
-    img_draw.text((600, 400), quest["title"], fill=(244, 233, 205), font=my_font)
-    img_draw.text((600, 850), add_eol(quest["description"], 46), fill=(244, 233, 205), spacing=10, font=my_font)
+    fill_color = (59, 217, 161)
+    result_text = ""
+    result_text += f"> Название: {quest['title']}\n"
     if quest["people_limit"] is None:
-        img_draw.text((550, 1850), "Для всех", fill=(244, 233, 205),
-                      font=ImageFont.truetype("OpenSans-Regular.ttf", 85))
+        result_text += "> Макимальное число выполняющих: Для всех\n"
     else:
-        img_draw.text((550, 1850), f"{quest['people_limit']}/{quest['people_limit']} игроков", fill=(244, 233, 205),
-                      font=ImageFont.truetype("OpenSans-Regular.ttf", 85))
-    img_draw.text((1400, 1850), f"{quest['reward']} опыта", fill=(244, 233, 205), font=my_font)
+        result_text += f"> Макимальное число выполняющих: {quest['people_limit']}\n"
+    result_text += f"> Награда: {quest['reward']} опыта\n"
     if quest["delete_time"] == "Постоянное":
-        img_draw.text((2400, 1850), f"{quest['delete_time']}", fill=(244, 233, 205),
-                      font=ImageFont.truetype("OpenSans-Regular.ttf", 85))
+        result_text += f"> Время удаления: Постоянное задание\n"
     else:
         quest_dt = datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S")
         if datetime.datetime.now().day == quest_dt.day:
-            img_draw.text((2400, 1850), quest_dt.strftime("До %H:%M"), fill=(244, 233, 205),
-                          font=ImageFont.truetype("OpenSans-Regular.ttf", 85))
+            result_text += f"> Время удаления: {quest_dt.strftime('До %H:%M')}\n"
         else:
-            img_draw.text((2400, 1850), quest_dt.strftime("До %H:%M %d.%m"), fill=(244, 233, 205),
-                          font=ImageFont.truetype("OpenSans-Regular.ttf", 85))
+            result_text += f"> Время удаления: {quest_dt.strftime('До %H:%M %d.%m')}\n"
+    result_text += f"> Описание: \n.. {add_eol(quest['description'],45)}"
+    img_draw.text((500, 800), result_text, fill=fill_color, spacing=10, font=my_font)
     last_quest_id = 0
     while os.path.isfile(f"quest_{last_quest_id}.png"):
         last_quest_id += 1
@@ -393,7 +441,7 @@ async def profile(ctx, other_name=""):
     embed.set_thumbnail(url=author_avatar)
     embed.add_field(name="Пользователь: ", value=f"{author_name}")
     embed.add_field(name="Уровень: ", value=f"{author['level']}")
-    embed.add_field(name="Звание: ", value=f"{titles[math.floor(author['level']/10)]}")
+    embed.add_field(name="Звание: ", value=f"{titles[math.floor(author['level'] / 10)]}")
     embed.add_field(name="Место в рейтинге: ", value=f"{calculate_player_rank(author['id'])}")
     embed.add_field(name="Опыт: ", value=f"{author['exp']}/{author['level'] * 5 + 5}")
     s = "Нет активных заданий"
