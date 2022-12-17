@@ -1,21 +1,18 @@
+import asyncio
 import math
 import os
 from asyncio import sleep
 
 import discord
+from discord import Embed
 from discord.ext import commands
 from tinydb import TinyDB, Query
 import datetime
 from PIL import Image, ImageDraw, ImageFont
 from table2ascii import table2ascii, PresetStyle
-from ui_components import QuestTypeView, TimeDeltaView
+from ui_components import QuestTypeView, TimeDeltaView, QuestView
 from cogs.help import Helper
 
-# Creates a bot (All intents just in case, help removed to be replaced by custom one)
-
-intents = discord.Intents.all()
-bot = commands.Bot(command_prefix='$', intents=intents)
-bot.remove_command('help')
 # The database
 db = TinyDB('db.json')
 # The token to run the bot
@@ -40,6 +37,32 @@ titles = [
              "Рекрут",
              "Кочевник"
          ][::-1]
+
+
+class ThothBot(commands.Bot):
+    def __init__(self):
+        intents = discord.Intents.all()
+        super().__init__(command_prefix=commands.when_mentioned_or('$'), intents=intents)
+        self.current_quests_views = dict()
+
+    async def setup_hook(self) -> None:
+        if quest_channel_id:
+            quest_list = db.search(Query().type == "quest")
+            for quest in quest_list:
+                temp_quest_channel = await bot.fetch_channel(quest_channel_id)
+                message = await temp_quest_channel.fetch_message(quest["id"])
+                current_players, max_players = map(int, message.embeds[0].fields[0].value.split("/"))
+                active_players = []
+                for player in db.search(Query().type == "player"):
+                    if message.id in player["current_quests"]:
+                        active_players.append(player["id"])
+                new_view = QuestView(self, active_players, max_players, current_players)
+                self.current_quests_views[message.id] = new_view
+                self.add_view(new_view, message_id=message.id)
+
+
+bot = ThothBot()
+bot.remove_command('help')
 
 
 # a checker for @commands.check to make command only accessible to quest keepers
@@ -244,6 +267,8 @@ async def create_quest(ctx):
 
 
 async def send_quest(ctx, quest, type_of_quest):
+    send_seconds = (datetime.datetime.strptime(quest["send_time"],
+                                               "%Y-%m-%d %H:%M:%S") - datetime.datetime.now()).total_seconds()
     if quest["delete_time"] is not None:
         delete_seconds = (
                 datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S") - datetime.datetime.strptime(
@@ -251,6 +276,7 @@ async def send_quest(ctx, quest, type_of_quest):
     else:
         delete_seconds = None
         quest["delete_time"] = "Постоянное"
+    await asyncio.sleep(int(send_seconds))
     await create_quest_image(ctx, quest, delete_seconds, type_of_quest)
 
 
@@ -300,14 +326,21 @@ async def create_quest_image(ctx, quest, delete_seconds, type_of_quest):
             result_text += f"> Время удаления: {quest_dt.strftime('До %H:%M')}\n"
         else:
             result_text += f"> Время удаления: {quest_dt.strftime('До %H:%M %d.%m')}\n"
-    result_text += f"> Описание: \n.. {add_eol(quest['description'],45)}"
+    result_text += f"> Описание: \n.. {add_eol(quest['description'], 45)}"
     img_draw.text((500, 800), result_text, fill=fill_color, spacing=10, font=my_font)
     last_quest_id = 0
     while os.path.isfile(f"quest_{last_quest_id}.png"):
         last_quest_id += 1
     img.save(f"quest_{last_quest_id}.png")
     img = discord.File(f"quest_{last_quest_id}.png")
-    message = await bot.get_channel(quest_channel_id).send(file=img, delete_after=delete_seconds)
+    embed = Embed()
+    if quest["people_limit"]:
+        embed.add_field(name="Количество доступных мест", value=f"{quest['people_limit']}/{quest['people_limit']}")
+    else:
+        embed.add_field(name="Количество доступных мест не ограничено", value="")
+    message = await bot.get_channel(quest_channel_id).send(file=img, delete_after=delete_seconds,
+                                                           view=QuestView(bot, [], quest["people_limit"],
+                                                                          quest["people_limit"]), embed=embed)
     quest["id"] = message.id
     db.insert(quest)
     os.remove(f"quest_{last_quest_id}.png")
@@ -337,48 +370,24 @@ async def confirm_quest(ctx, player_name, *, quest_title):
     quest_channel_temp = await bot.fetch_channel(quest_channel_id)
     message = await quest_channel_temp.fetch_message(quest_data["id"])
     player_member = await bot.fetch_user(player_profile["id"])
-    await message.remove_reaction("✅", player_member)
+    player_profile["current_quests"].remove(message.id)
+    db.update(player_profile, Query().id == player_profile["id"])
+    bot.current_quests_views[message.id].players_with_quest.remove(player_profile["id"])
 
 
 @bot.event
-async def on_raw_reaction_add(payload):
-    if payload.user_id == bot.application_id:
-        return
-    if payload.emoji.name == "✅" and (db.search(Query().id == payload.message_id)):
-        player = db.search(Query().id == payload.user_id)[0]
-        quest_data = db.search(Query().id == payload.message_id)[0]
-        if quest_data["people_limit"] is not None:
-            channel = bot.get_channel(payload.channel_id)
-            message = await channel.fetch_message(payload.message_id)
-            if quest_data["people_limit"] == 0:
-                await message.remove_reaction("✅", payload.member)
-            else:
-                db.remove(Query().id == payload.message_id)
-                quest_data["people_limit"] -= 1
-                db.insert(quest_data)
-                if quest_data["people_limit"] == 0:
-                    await message.add_reaction("❎")
-        player["current_quests"].append(payload.message_id)
-        db.remove(Query().id == payload.user_id)
-        db.insert(player)
+async def on_accepted_quest(user, message):
+    player = db.search(Query().id == user.id)[0]
+    if message.id not in player["current_quests"]:
+        player["current_quests"].append(message.id)
+        db.update(player, Query().id == user.id)
 
 
 @bot.event
-async def on_raw_reaction_remove(payload):
-    if payload.emoji.name == "✅" and (db.search(Query().id == payload.message_id)):
-        player = db.search(Query().id == payload.user_id)[0]
-        quest_data = db.search(Query().id == payload.message_id)[0]
-        if quest_data["people_limit"] is not None:
-            channel = bot.get_channel(payload.channel_id)
-            message = await channel.fetch_message(payload.message_id)
-            db.remove(Query().id == payload.message_id)
-            quest_data["people_limit"] += 1
-            db.insert(quest_data)
-            bot_user = await bot.fetch_user(1001949200600272896)
-            await message.remove_reaction("❎", bot_user)
-        player["current_quests"].remove(payload.message_id)
-        db.remove(Query().id == payload.user_id)
-        db.insert(player)
+async def on_refused_quest(user, message):
+    player = db.search(Query().id == user.id)[0]
+    player["current_quests"].remove(message.id)
+    db.update(player, Query().id == user.id)
 
 
 def get_board():
