@@ -10,7 +10,9 @@ from tinydb import TinyDB, Query
 import datetime
 from PIL import Image, ImageDraw, ImageFont
 from table2ascii import table2ascii, PresetStyle
-from ui_components import QuestTypeView, TimeDeltaView, QuestView
+
+from cogs.dailies import Dailies
+from ui.ui_components import QuestTypeView, TimeDeltaView, QuestView
 from cogs.help import Helper
 
 # The database
@@ -51,7 +53,10 @@ class ThothBot(commands.Bot):
             for quest in quest_list:
                 temp_quest_channel = await bot.fetch_channel(quest_channel_id)
                 message = await temp_quest_channel.fetch_message(quest["id"])
-                current_players, max_players = map(int, message.embeds[0].fields[0].value.split("/"))
+                if message.embeds[0].fields[0].value == "не ограничено":
+                    current_players, max_players = None, None
+                else:
+                    current_players, max_players = map(int, message.embeds[0].fields[0].value.split("/"))
                 active_players = []
                 for player in db.search(Query().type == "player"):
                     if message.id in player["current_quests"]:
@@ -79,6 +84,7 @@ async def quest_keeper_level(ctx):
 @bot.event
 async def on_ready():
     await bot.add_cog(Helper(bot))
+    await bot.add_cog(Dailies(bot, db, create_quest_image))
 
 
 # Simply adds empty profile with players id into db
@@ -277,7 +283,7 @@ async def send_quest(ctx, quest, type_of_quest):
         delete_seconds = None
         quest["delete_time"] = "Постоянное"
     await asyncio.sleep(int(send_seconds))
-    await create_quest_image(ctx, quest, delete_seconds, type_of_quest)
+    await create_quest_image(quest, delete_seconds, type_of_quest)
 
 
 def add_eol(text, n):
@@ -297,9 +303,7 @@ def add_eol(text, n):
     return result
 
 
-async def create_quest_image(ctx, quest, delete_seconds, type_of_quest):
-    # printing only to turn off the "unused parameter warning"
-    print(ctx.author)
+async def create_quest_image(quest, delete_seconds, type_of_quest):
     my_font = ImageFont.truetype("font.ttf", 100)
     img = None
     match type_of_quest:
@@ -337,13 +341,16 @@ async def create_quest_image(ctx, quest, delete_seconds, type_of_quest):
     if quest["people_limit"]:
         embed.add_field(name="Количество доступных мест", value=f"{quest['people_limit']}/{quest['people_limit']}")
     else:
-        embed.add_field(name="Количество доступных мест не ограничено", value="")
-    message = await bot.get_channel(quest_channel_id).send(file=img, delete_after=delete_seconds,
-                                                           view=QuestView(bot, [], quest["people_limit"],
-                                                                          quest["people_limit"]), embed=embed)
+        embed.add_field(name="Количество доступных мест", value="не ограничено")
+    local_quest_channel_id = db.search(Query().type == "quest_channel_id")[0]["value"]
+    message = await bot.get_channel(local_quest_channel_id).send(file=img, delete_after=delete_seconds,
+                                                                 view=QuestView(bot, [], quest["people_limit"],
+                                                                                quest["people_limit"]), embed=embed)
     quest["id"] = message.id
-    db.insert(quest)
+    doc_id = db.insert(quest)
     os.remove(f"quest_{last_quest_id}.png")
+    await asyncio.sleep(delete_seconds)
+    db.remove(doc_ids=[doc_id])
 
 
 # noinspection PyTypeChecker
