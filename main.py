@@ -28,9 +28,9 @@ if db.search(Query().type == "quest_channel_id"):
     quest_channel_id = db.search(Query().type == "quest_channel_id")[0]["value"]
 titles = [
              "Старейшина",
-             "Возносящийся в старейшины",
              "Администратор",
              "Премьер-секретарь",
+             "Секретарь",
              "Советник",
              "Посол",
              "Бригадир",
@@ -461,11 +461,20 @@ async def profile(ctx, other_name=""):
     embed.add_field(name="Место в рейтинге: ", value=f"{calculate_player_rank(author['id'])}")
     embed.add_field(name="Опыт: ", value=f"{author['exp']}/{author['level'] * 5 + 5}")
     s = "Нет активных заданий"
+    to_be_removed_quests = []
     for quest_id in author["current_quests"]:
         if s == "Нет активных заданий":
             s = ""
-        quest_title = db.search(Query().id == quest_id)[0]["title"]
+        quest = db.search(Query().id == quest_id)
+        quest_title = ""
+        if quest:
+            quest_title = quest[0]["title"]
+        else:
+            to_be_removed_quests.append(quest_id)
         s += f"{quest_title}\n"
+    for quest_id in to_be_removed_quests:
+        author["current_quests"].remove(quest_id)
+    db.update({"current_quests": author["current_quests"]}, Query().id == author["id"])
     embed.add_field(name="Активные задания: ", value=s)
     await ctx.send(embed=embed)
 

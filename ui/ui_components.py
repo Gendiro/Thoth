@@ -92,7 +92,7 @@ class QuestView(View):
             return
         count_embed = Embed()
         if self.max_players is not None:
-            if not button.disabled:
+            if not button.disabled and self.current_players is not None:
                 self.current_players -= 1
             if self.current_players == 0:
                 button.disabled = True
@@ -113,7 +113,8 @@ class QuestView(View):
         if self.children[0].disabled:
             self.children[0].disabled = False
             self.children[0].emoji = "✅"
-        self.current_players += 1
+        if self.current_players is not None:
+            self.current_players += 1
         count_embed = Embed()
         count_embed.add_field(name="Количество доступных мест", value=f"{self.current_players}/{self.max_players}")
         self.bot.dispatch("refused_quest", interaction.user, interaction.message)
