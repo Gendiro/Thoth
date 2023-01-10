@@ -99,7 +99,7 @@ class QuestView(View):
                 button.emoji = "❌"
             count_embed.add_field(name="Количество доступных мест", value=f"{self.current_players}/{self.max_players}")
         else:
-            count_embed.add_field(name="Количество доступных мест не ограничено", value="")
+            count_embed.add_field(name="Количество доступных мест", value="не ограничено")
         self.players_with_quest.append(interaction.user.id)
         print(self.players_with_quest)
         self.bot.dispatch("accepted_quest", interaction.user, interaction.message)
@@ -116,7 +116,10 @@ class QuestView(View):
         if self.current_players is not None:
             self.current_players += 1
         count_embed = Embed()
-        count_embed.add_field(name="Количество доступных мест", value=f"{self.current_players}/{self.max_players}")
+        if self.max_players is not None:
+            count_embed.add_field(name="Количество доступных мест", value=f"{self.current_players}/{self.max_players}")
+        else:
+            count_embed.add_field(name="Количество доступных мест", value="не ограничено")
         self.bot.dispatch("refused_quest", interaction.user, interaction.message)
         self.players_with_quest.remove(interaction.user.id)
         await interaction.response.edit_message(view=self, embed=count_embed)

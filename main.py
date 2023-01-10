@@ -2,15 +2,14 @@ import asyncio
 import math
 import os
 from asyncio import sleep
-
 import discord
+import pytz
 from discord import Embed
 from discord.ext import commands
 from tinydb import TinyDB, Query
 import datetime
 from PIL import Image, ImageDraw, ImageFont
 from table2ascii import table2ascii, PresetStyle
-
 from cogs.dailies import Dailies
 from ui.ui_components import QuestTypeView, TimeDeltaView, QuestView
 from cogs.help import Helper
@@ -49,21 +48,42 @@ class ThothBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         if quest_channel_id:
-            quest_list = db.search(Query().type == "quest")
-            for quest in quest_list:
-                temp_quest_channel = await bot.fetch_channel(quest_channel_id)
-                message = await temp_quest_channel.fetch_message(quest["id"])
-                if message.embeds[0].fields[0].value == "не ограничено":
-                    current_players, max_players = None, None
-                else:
-                    current_players, max_players = map(int, message.embeds[0].fields[0].value.split("/"))
-                active_players = []
-                for player in db.search(Query().type == "player"):
-                    if message.id in player["current_quests"]:
-                        active_players.append(player["id"])
-                new_view = QuestView(self, active_players, max_players, current_players)
-                self.current_quests_views[message.id] = new_view
-                self.add_view(new_view, message_id=message.id)
+            return
+        quest_list = db.search(Query().type == "quest")
+        for quest in quest_list:
+            time_of_delete = datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S").date()
+            time_now = datetime.datetime.now().date()
+            if time_now > time_of_delete:
+                try:
+                    temp_quest_channel = await bot.fetch_channel(quest_channel_id)
+                    message = await temp_quest_channel.fetch_message(quest["id"])
+                    await message.delete()
+                except discord.NotFound as e:
+                    pass
+                db.remove(doc_ids=[quest.doc_id])
+            # elif datetime.datetime.strptime(quest["send_time"], "%Y-%m-%d %H:%M:%S").date() > \
+            #        datetime.datetime.now().date():
+            else:
+                try:
+                    temp_quest_channel = await bot.fetch_channel(quest_channel_id)
+                    message = await temp_quest_channel.fetch_message(quest["id"])
+                    if message.embeds[0].fields[0].value == "не ограничено":
+                        current_players, max_players = None, None
+                    else:
+                        current_players, max_players = map(int, message.embeds[0].fields[0].value.split("/"))
+                    active_players = []
+                    for player in db.search(Query().type == "player"):
+                        if message.id in player["current_quests"]:
+                            active_players.append(player["id"])
+                    new_view = QuestView(self, active_players, max_players, current_players)
+                    self.current_quests_views[message.id] = new_view
+                    self.add_view(new_view, message_id=message.id)
+                    time_of_delete = datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S").date()
+                    time_now = datetime.datetime.now().date()
+                    delete_seconds = (time_now - time_of_delete).total_seconds()
+                    await message.delete(delay=delete_seconds)
+                except discord.NotFound as e:
+                    db.remove(doc_ids=[quest.doc_id])
 
 
 bot = ThothBot()
@@ -138,11 +158,59 @@ async def give_player_xp(ctx, player, exp):
     db.update({"exp": player_profile["exp"], "level": player_profile["level"]}, Query().id == player.id)
 
 
-@bot.command(name="give_exp")
+async def take_player_xp(ctx, player, exp):
+    player_profile = db.search(Query().id == player.id)[0]
+    player_profile["exp"] -= exp
+    while player_profile["exp"] < 0:
+        player_profile["exp"] += (player_profile["level"] - 1) * 5 + 5
+        player_profile["level"] -= 1
+        if math.floor((player_profile["level"] + 1) / 10) != math.floor(player_profile["level"] / 10):
+            old_title_id = math.floor((player_profile["level"] + 1) / 10)
+            new_title_id = math.floor(player_profile["level"] / 10)
+            old_title = discord.utils.get(ctx.guild.roles, name=titles[old_title_id])
+            new_title = discord.utils.get(ctx.guild.roles, name=titles[new_title_id])
+            if old_title is None:
+                old_title = await ctx.guild.create_role(name=titles[old_title_id], hoist=True)
+            if new_title is None:
+                new_title = await ctx.guild.create_role(name=titles[new_title_id], hoist=True)
+            await player.remove_roles(old_title)
+            await player.add_roles(new_title)
+
+    db.update({"exp": player_profile["exp"], "level": player_profile["level"]}, Query().id == player.id)
+
+
+@bot.command()
 @commands.check(quest_keeper_level)
 async def give_exp(ctx, player_name, exp):
     player = discord.utils.get(ctx.guild.members, name=player_name)
     await give_player_xp(ctx, player, int(exp))
+
+
+@bot.command()
+@commands.check(quest_keeper_level)
+async def take_exp(ctx, player_name, exp):
+    player = discord.utils.get(ctx.guild.members, name=player_name)
+    await take_player_xp(ctx, player, int(exp))
+
+
+@bot.command()
+@commands.check(quest_keeper_level)
+async def delete_quest(ctx, *, quest_title):
+    quests = db.search(Query().type == "quest")
+    quest = None
+    for q in quests:
+        if q["title"] == quest_title:
+            quest = q
+            break
+    temp_quest_channel = await bot.fetch_channel(quest_channel_id)
+    message = await temp_quest_channel.fetch_message(quest["id"])
+    await message.delete()
+    players = db.search(Query().type == "player")
+    for player in players:
+        if quest["id"] in player["current_quests"]:
+            player.pop(quest["id"])
+            db.update({"current_quests": player["current_quests"]}, Query().id == player["id"])
+    db.remove(doc_ids=[quest.doc_id])
 
 
 # Greats new players and adds them to db
@@ -234,10 +302,14 @@ async def create_quest(ctx):
         by_hand_message = await ctx.send("Введите время в формете 2010-10-10 10:10:10")
         by_hand_answer_message = await bot.wait_for('message', check=check)
         send_time = by_hand_answer_message.content
+        send_time_datetime = datetime.datetime.strptime(send_time, "%Y-%m-%d %H:%M:%S")
+        send_time_datetime.replace(tzinfo=pytz.timezone('Europe/Moscow'))
+        send_time = send_time_datetime.strftime("%Y-%m-%d %H:%M:%S")
         await by_hand_message.delete()
         await by_hand_answer_message.delete()
     else:
-        send_time = (datetime.datetime.today() + send_time_view.get_time_delta()).strftime("%Y-%m-%d %H:%M:%S")
+        send_time = (datetime.datetime.now() + send_time_view.get_time_delta()) \
+            .strftime("%Y-%m-%d %H:%M:%S")
     await send_time_message.delete()
     delete_time_view = TimeDeltaView()
     delete_time_message = await ctx.send("Выберите время удаления", view=delete_time_view)
@@ -247,6 +319,9 @@ async def create_quest(ctx):
         by_hand_message = await ctx.send("Введите время в формете 2010-10-10 10:10:10")
         by_hand_answer_message = await bot.wait_for('message', check=check)
         delete_time = by_hand_answer_message.content
+        delete_time_datetime = datetime.datetime.strptime(delete_time, "%Y-%m-%d %H:%M:%S")
+        delete_time_datetime.replace(tzinfo=pytz.timezone('Europe/Moscow'))
+        delete_time = delete_time_datetime.strftime("%Y-%m-%d %H:%M:%S")
         await by_hand_message.delete()
         await by_hand_answer_message.delete()
     else:
@@ -256,6 +331,7 @@ async def create_quest(ctx):
     description_message = await ctx.send("Введите описание задания: ")
     description_answer_message = await bot.wait_for('message', check=check)
     description = description_answer_message.content
+    description_attachments = description_answer_message.attachments
     await description_message.delete()
     await description_answer_message.delete()
     result_quest = {
@@ -269,21 +345,28 @@ async def create_quest(ctx):
     }
     await ctx.message.delete()
     print(result_quest)
-    await send_quest(ctx, result_quest, type_of_quest)
+    await send_quest(ctx, result_quest, type_of_quest, description_attachments)
 
 
-async def send_quest(ctx, quest, type_of_quest):
+async def send_quest(ctx, quest, type_of_quest, description_attachments):
     send_seconds = (datetime.datetime.strptime(quest["send_time"],
-                                               "%Y-%m-%d %H:%M:%S") - datetime.datetime.now()).total_seconds()
+                                               "%Y-%m-%d %H:%M:%S")
+                    - datetime.datetime.now()).total_seconds()
     if quest["delete_time"] is not None:
         delete_seconds = (
-                datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S") - datetime.datetime.strptime(
-            quest["send_time"], "%Y-%m-%d %H:%M:%S")).total_seconds()
+                datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S")
+                - datetime.datetime.strptime(quest["send_time"],
+                                             "%Y-%m-%d %H:%M:%S")).total_seconds()
     else:
         delete_seconds = None
         quest["delete_time"] = "Постоянное"
     await asyncio.sleep(int(send_seconds))
-    await create_quest_image(quest, delete_seconds, type_of_quest)
+
+    files = []
+    for attachment in description_attachments:
+        new_file = await attachment.to_file()
+        files.append(new_file)
+    await create_quest_image(quest, delete_seconds, type_of_quest, files)
 
 
 def add_eol(text, n):
@@ -303,16 +386,16 @@ def add_eol(text, n):
     return result
 
 
-async def create_quest_image(quest, delete_seconds, type_of_quest):
+async def create_quest_image(quest, delete_seconds, type_of_quest, files=None):
     my_font = ImageFont.truetype("font.ttf", 100)
     img = None
     match type_of_quest:
         case "Дейлик":
-            img = Image.open('daily_quest_template')
+            img = Image.open('sprites/quest_templates/daily_quest_template')
         case "Обычный":
-            img = Image.open('regular_quest_template')
+            img = Image.open('sprites/quest_templates/regular_quest_template')
         case "Ивент":
-            img = Image.open('event_quest_template')
+            img = Image.open('sprites/quest_templates/event_quest_template')
     img_draw = ImageDraw.Draw(img)
     fill_color = (59, 217, 161)
     result_text = ""
@@ -330,7 +413,7 @@ async def create_quest_image(quest, delete_seconds, type_of_quest):
             result_text += f"> Время удаления: {quest_dt.strftime('До %H:%M')}\n"
         else:
             result_text += f"> Время удаления: {quest_dt.strftime('До %H:%M %d.%m')}\n"
-    result_text += f"> Описание: \n.. {add_eol(quest['description'], 45)}"
+    result_text += f"> Описание: \n.. {add_eol(quest['description'], 40)}"
     img_draw.text((500, 800), result_text, fill=fill_color, spacing=10, font=my_font)
     last_quest_id = 0
     while os.path.isfile(f"quest_{last_quest_id}.png"):
@@ -343,13 +426,18 @@ async def create_quest_image(quest, delete_seconds, type_of_quest):
     else:
         embed.add_field(name="Количество доступных мест", value="не ограничено")
     local_quest_channel_id = db.search(Query().type == "quest_channel_id")[0]["value"]
-    message = await bot.get_channel(local_quest_channel_id).send(file=img, delete_after=delete_seconds,
-                                                                 view=QuestView(bot, [], quest["people_limit"],
-                                                                                quest["people_limit"]), embed=embed)
+    local_quest_channel = bot.get_channel(local_quest_channel_id)
+    new_view = QuestView(bot, [], quest["people_limit"], quest["people_limit"])
+    if files is None:
+        files = [img]
+    else:
+        files.insert(0, img)
+    message = await local_quest_channel.send(files=files, delete_after=delete_seconds, view=new_view, embed=embed)
     quest["id"] = message.id
     doc_id = db.insert(quest)
     os.remove(f"quest_{last_quest_id}.png")
     await asyncio.sleep(delete_seconds)
+    await message.delete()
     db.remove(doc_ids=[doc_id])
 
 
@@ -410,10 +498,16 @@ def calculate_player_rank(player_id):
 
 
 @bot.command(name="leaderboard")
-async def leaderboard(ctx):
+async def leaderboard(ctx, number=None):
     board = get_board()
     prepared_board = []
-    for i in range(3, min(len(board), 13)):
+    if number is None:
+        number = 13
+    elif number == "full":
+        number = len(board)
+    else:
+        number = int(number) + 3
+    for i in range(3, min(len(board), number)):
         member = await ctx.guild.fetch_member(board[i]["id"])
         if member.nick:
             name = member.nick
@@ -421,7 +515,7 @@ async def leaderboard(ctx):
             player = await bot.fetch_user(board[i]["id"])
             name = player.name
         prepared_board.append([i - 2, name, board[i]['exp'], board[i]['level']])
-    output = table2ascii(header=["Rank", "Name", "Level", "Exp"], body=prepared_board, style=PresetStyle.thin_compact)
+    output = table2ascii(header=["Rank", "Name", "Exp", "Level"], body=prepared_board, style=PresetStyle.thin_compact)
     await ctx.send(f"```\n{output}\n```")
 
 
@@ -442,7 +536,13 @@ async def profile(ctx, other_name=""):
             await ctx.send("profile of this user is not created yet")
             return
         author_name = other_name
-        author_avatar = player.avatar
+        if not os.path.isfile(f"sprites/avatars/avatar_{player.name}.png"):
+            await player.avatar.save(f"sprites/avatars/avatar_{player.name}.png")
+        elif player.avatar.url != author["avatar_url"]:
+            os.remove(f"sprites/avatars/avatar_{player.name}.png")
+            await player.avatar.save(f"sprites/avatars/avatar_{player.name}.png")
+            db.update({"avatar_url": player.avatar.url}, Query().id == author["id"])
+        avatar = Image.open(f"sprites/avatars/avatar_{player.name}.png")
     else:
         for document in db.all():
             if document["type"] == "player" and document["id"] == ctx.author.id:
@@ -452,7 +552,31 @@ async def profile(ctx, other_name=""):
             await profile(ctx)
             return
         author_name = ctx.author.name
-        author_avatar = ctx.author.avatar
+        if not os.path.isfile(f"sprites/avatars/avatar_{ctx.author.name}.png"):
+            await ctx.author.avatar.save(f"sprites/avatars/avatar_{ctx.author.name}.png")
+        elif ctx.author.avatar.url != author["avatar_url"]:
+            os.remove(f"sprites/avatars/avatar_{ctx.author.name}.png")
+            await ctx.author.avatar.save(f"sprites/avatars/avatar_{ctx.author.name}.png")
+            db.update({"avatar_url": ctx.author.avatar.url}, Query().id == author["id"])
+        avatar = Image.open(f"sprites/avatars/avatar_{ctx.author.name}.png")
+    my_font = ImageFont.truetype("font.ttf", 65)
+    img = Image.open(f"sprites/profile_sprites/profile_{math.floor(author['level'] / 10)}.png")
+
+    mask_im = Image.open("sprites/mask_circle.jpg")
+
+    avatar = avatar.resize((380, 380), Image.Resampling.BOX)
+
+    img.paste(avatar, (230, 330), mask_im)
+
+    img_draw = ImageDraw.Draw(img)
+    fill_color = (59, 217, 161)
+    img_draw.text((700, 300), author_name, fill=fill_color, font=my_font)
+    img_draw.text((700, 380),
+                  f"Опыт: {author['exp']}/{author['level'] * 5 + 5}, топ {calculate_player_rank(author['id'])}",
+                  fill=fill_color, font=my_font)
+    img_draw.text((700, 460), f"{titles[math.floor(author['level'] / 10)]}", fill=fill_color, font=my_font)
+
+    """
     embed = discord.Embed()
     embed.set_thumbnail(url=author_avatar)
     embed.add_field(name="Пользователь: ", value=f"{author_name}")
@@ -460,9 +584,11 @@ async def profile(ctx, other_name=""):
     embed.add_field(name="Звание: ", value=f"{titles[math.floor(author['level'] / 10)]}")
     embed.add_field(name="Место в рейтинге: ", value=f"{calculate_player_rank(author['id'])}")
     embed.add_field(name="Опыт: ", value=f"{author['exp']}/{author['level'] * 5 + 5}")
+    """
+
     s = "Нет активных заданий"
     to_be_removed_quests = []
-    for quest_id in author["current_quests"]:
+    for quest_id in author["current_quests"][:min(len(author["current_quests"]), 8)]:
         if s == "Нет активных заданий":
             s = ""
         quest = db.search(Query().id == quest_id)
@@ -471,12 +597,29 @@ async def profile(ctx, other_name=""):
             quest_title = quest[0]["title"]
         else:
             to_be_removed_quests.append(quest_id)
-        s += f"{quest_title}\n"
+        s += f"> {quest_title}\n"
     for quest_id in to_be_removed_quests:
         author["current_quests"].remove(quest_id)
+    if len(author["current_quests"]) >= 8:
+        s += "> ..."
     db.update({"current_quests": author["current_quests"]}, Query().id == author["id"])
-    embed.add_field(name="Активные задания: ", value=s)
-    await ctx.send(embed=embed)
+    # embed.add_field(name="Активные задания: ", value=s)
 
+    img_draw.text((350, 950), s, fill=fill_color, font=my_font)
+
+    green_lights_count = math.floor((author['exp'] / (author['level'] * 5 + 5)) * 10)
+
+    for i in range(green_lights_count):
+        img_draw.rectangle((782 + 112 * i, 662, 886 + 112 * i, 762), fill=(108, 213, 33))
+
+    my_font = ImageFont.truetype("font.ttf", 80)
+    fill_color = (52, 79, 36)
+    img_draw.text((650, 680), f"{author['level']}", fill=fill_color, font=my_font)
+
+    img.save(f"profile.png")
+    img = discord.File(f"profile.png")
+
+    await ctx.send(file=img)
+    os.remove("profile.png")
 
 bot.run(TOKEN)

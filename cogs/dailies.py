@@ -1,3 +1,4 @@
+import asyncio
 import discord
 from discord.ext import commands, tasks
 from tinydb import TinyDB, Query
@@ -90,15 +91,17 @@ class Dailies(commands.Cog):
 
     @tasks.loop(minutes=5.0)
     async def send_dailies(self):
-        if datetime.today().strftime("%Y-%m-%d") == self.last_time:
+        if datetime.now().strftime("%Y-%m-%d") == self.last_time:
             return
-        self.last_time = datetime.today().strftime("%Y-%m-%d")
+        self.last_time = datetime.now().strftime("%Y-%m-%d")
         self.db.update({"last_time": self.last_time}, Query().type == "dailies")
         delete_time = self.last_time + " 23:59:59"
         delete_seconds = (datetime.strptime(delete_time, "%Y-%m-%d %H:%M:%S")
                           - datetime.now()).total_seconds()
         quests = list(self.dailies.keys())
         random.shuffle(quests)
+        print(self.count)
+        print(quests[:self.count])
         for quest in quests[:self.count]:
             result_quest = {
                 "type": "quest",
@@ -109,7 +112,7 @@ class Dailies(commands.Cog):
                 "delete_time": delete_time,
                 "description": self.dailies[quest]
             }
-            await self.create_quest_image(result_quest, delete_seconds, "Дейлик")
+            asyncio.get_event_loop().create_task(self.create_quest_image(result_quest, delete_seconds, "Дейлик"))
 
     @send_dailies.before_loop
     async def before_send_dailies(self):
