@@ -13,6 +13,7 @@ from table2ascii import table2ascii, PresetStyle
 from cogs.dailies import Dailies
 from ui.ui_components import QuestTypeView, TimeDeltaView, QuestView
 from cogs.help import Helper
+import re
 
 # The database
 db = TinyDB('db.json')
@@ -25,6 +26,8 @@ if db.search(Query().type == "welcome_channel_id"):
 quest_channel_id = 0
 if db.search(Query().type == "quest_channel_id"):
     quest_channel_id = db.search(Query().type == "quest_channel_id")[0]["value"]
+if not db.search(Query().type == "quest_count"):
+    db.insert({"type": "quest_count", "value": 0})
 titles = [
              "Старейшина",
              "Администратор",
@@ -47,43 +50,52 @@ class ThothBot(commands.Bot):
         self.current_quests_views = dict()
 
     async def setup_hook(self) -> None:
-        if quest_channel_id:
+        if not quest_channel_id:
             return
         quest_list = db.search(Query().type == "quest")
         for quest in quest_list:
-            time_of_delete = datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S").date()
-            time_now = datetime.datetime.now().date()
+            time_of_delete = datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S")
+            time_of_delete = time_of_delete.replace(tzinfo=pytz.timezone('Europe/Moscow'))
+            time_now = datetime.datetime.now()
+            time_now = time_now.replace(tzinfo=pytz.timezone('Europe/Moscow'))
             if time_now > time_of_delete:
                 try:
                     temp_quest_channel = await bot.fetch_channel(quest_channel_id)
-                    message = await temp_quest_channel.fetch_message(quest["id"])
-                    await message.delete()
+                    if quest["discord_id"]:
+                        message = await temp_quest_channel.fetch_message(quest["discord_id"])
+                        await message.delete()
                 except discord.NotFound as e:
                     pass
                 db.remove(doc_ids=[quest.doc_id])
-            # elif datetime.datetime.strptime(quest["send_time"], "%Y-%m-%d %H:%M:%S").date() > \
-            #        datetime.datetime.now().date():
             else:
                 try:
-                    temp_quest_channel = await bot.fetch_channel(quest_channel_id)
-                    message = await temp_quest_channel.fetch_message(quest["id"])
-                    if message.embeds[0].fields[0].value == "не ограничено":
-                        current_players, max_players = None, None
-                    else:
-                        current_players, max_players = map(int, message.embeds[0].fields[0].value.split("/"))
-                    active_players = []
-                    for player in db.search(Query().type == "player"):
-                        if message.id in player["current_quests"]:
-                            active_players.append(player["id"])
-                    new_view = QuestView(self, active_players, max_players, current_players)
-                    self.current_quests_views[message.id] = new_view
-                    self.add_view(new_view, message_id=message.id)
-                    time_of_delete = datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S").date()
-                    time_now = datetime.datetime.now().date()
-                    delete_seconds = (time_now - time_of_delete).total_seconds()
-                    await message.delete(delay=delete_seconds)
+                    asyncio.get_event_loop().create_task(self.setup_quest(quest, time_of_delete, time_now))
                 except discord.NotFound as e:
                     db.remove(doc_ids=[quest.doc_id])
+
+    async def setup_quest(self, quest, time_of_delete, time_now):
+        temp_quest_channel = await self.fetch_channel(quest_channel_id)
+        delete_afterwards = True
+        if quest["discord_id"] is None:
+            delete_afterwards = False
+            await send_quest(None, quest, None)
+        message = await temp_quest_channel.fetch_message(quest["discord_id"])
+        if message.embeds[0].fields[0].value == "не ограничено":
+            current_players, max_players = None, None
+        else:
+            current_players, max_players = map(int, message.embeds[0].fields[0].value.split("/"))
+        active_players = []
+        for player in db.search(Query().type == "player"):
+            if message.id in player["current_quests"]:
+                active_players.append(player["id"])
+        new_view = QuestView(self, active_players, max_players, current_players)
+        self.current_quests_views[message.id] = new_view
+        self.add_view(new_view, message_id=message.id)
+        delete_seconds = (time_of_delete - time_now).total_seconds()
+        if delete_afterwards:
+            await message.delete(delay=delete_seconds)
+            await asyncio.sleep(delete_seconds)
+            db.remove(doc_ids=[quest.doc_id])
 
 
 bot = ThothBot()
@@ -115,7 +127,8 @@ def add_player_to_db(player_id):
             "id": player_id,
             "level": 0,
             "exp": 0,
-            "current_quests": []
+            "current_quests": [],
+            "avatar_url": ""
         })
 
 
@@ -187,10 +200,26 @@ async def give_exp(ctx, player_name, exp):
 
 
 @bot.command()
+async def give_achievement(ctx, player_name, *, achievement_name):
+    player = discord.utils.get(ctx.guild.members, name=player_name)
+    player_data = db.search(Query().type == "player" and Query().id == player.id)[0]
+    player_data["achievements"].append(achievement_name)
+    db.update({"achievements": player_data["achievements"]}, Query().type == "player" and Query().id == player.id)
+
+
+@bot.command()
 @commands.check(quest_keeper_level)
 async def take_exp(ctx, player_name, exp):
     player = discord.utils.get(ctx.guild.members, name=player_name)
     await take_player_xp(ctx, player, int(exp))
+
+
+@bot.command()
+async def take_achievement(ctx, player_name, *, achievement_name):
+    player = discord.utils.get(ctx.guild.members, name=player_name)
+    player_data = db.search(Query().type == "player" and Query().id == player.id)[0]
+    player_data["achievements"].remove(achievement_name)
+    db.update({"achievements": player_data["achievements"]}, Query().type == "player" and Query().id == player.id)
 
 
 @bot.command()
@@ -203,12 +232,12 @@ async def delete_quest(ctx, *, quest_title):
             quest = q
             break
     temp_quest_channel = await bot.fetch_channel(quest_channel_id)
-    message = await temp_quest_channel.fetch_message(quest["id"])
+    message = await temp_quest_channel.fetch_message(quest["discord_id"])
     await message.delete()
     players = db.search(Query().type == "player")
     for player in players:
-        if quest["id"] in player["current_quests"]:
-            player.pop(quest["id"])
+        if quest["discord_id"] in player["current_quests"]:
+            player.pop(quest["discord_id"])
             db.update({"current_quests": player["current_quests"]}, Query().id == player["id"])
     db.remove(doc_ids=[quest.doc_id])
 
@@ -303,7 +332,7 @@ async def create_quest(ctx):
         by_hand_answer_message = await bot.wait_for('message', check=check)
         send_time = by_hand_answer_message.content
         send_time_datetime = datetime.datetime.strptime(send_time, "%Y-%m-%d %H:%M:%S")
-        send_time_datetime.replace(tzinfo=pytz.timezone('Europe/Moscow'))
+        send_time_datetime = send_time_datetime.replace(tzinfo=pytz.timezone('Europe/Moscow'))
         send_time = send_time_datetime.strftime("%Y-%m-%d %H:%M:%S")
         await by_hand_message.delete()
         await by_hand_answer_message.delete()
@@ -320,7 +349,7 @@ async def create_quest(ctx):
         by_hand_answer_message = await bot.wait_for('message', check=check)
         delete_time = by_hand_answer_message.content
         delete_time_datetime = datetime.datetime.strptime(delete_time, "%Y-%m-%d %H:%M:%S")
-        delete_time_datetime.replace(tzinfo=pytz.timezone('Europe/Moscow'))
+        delete_time_datetime = delete_time_datetime.replace(tzinfo=pytz.timezone('Europe/Moscow'))
         delete_time = delete_time_datetime.strftime("%Y-%m-%d %H:%M:%S")
         await by_hand_message.delete()
         await by_hand_answer_message.delete()
@@ -341,32 +370,35 @@ async def create_quest(ctx):
         "people_limit": people_limit,
         "send_time": send_time,
         "delete_time": delete_time,
-        "description": description
+        "description": description,
+        "type_of_quest": type_of_quest
     }
     await ctx.message.delete()
     print(result_quest)
-    await send_quest(ctx, result_quest, type_of_quest, description_attachments)
+    await send_quest(ctx, result_quest, description_attachments)
 
 
-async def send_quest(ctx, quest, type_of_quest, description_attachments):
-    send_seconds = (datetime.datetime.strptime(quest["send_time"],
-                                               "%Y-%m-%d %H:%M:%S")
-                    - datetime.datetime.now()).total_seconds()
+async def send_quest(ctx, quest, description_attachments=None):
+    if description_attachments is None:
+        description_attachments = []
+    send_time = datetime.datetime.strptime(quest["send_time"], "%Y-%m-%d %H:%M:%S")
+    send_time = send_time.replace(tzinfo=pytz.timezone('Europe/Moscow'))
+    delete_time = datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S")
+    delete_time = delete_time.replace(tzinfo=pytz.timezone('Europe/Moscow'))
+    now_time = datetime.datetime.now()
+    now_time = now_time.replace(tzinfo=pytz.timezone('Europe/Moscow'))
+    send_seconds = (send_time - now_time).total_seconds()
     if quest["delete_time"] is not None:
-        delete_seconds = (
-                datetime.datetime.strptime(quest["delete_time"], "%Y-%m-%d %H:%M:%S")
-                - datetime.datetime.strptime(quest["send_time"],
-                                             "%Y-%m-%d %H:%M:%S")).total_seconds()
+        delete_seconds = (delete_time - send_time).total_seconds()
     else:
         delete_seconds = None
         quest["delete_time"] = "Постоянное"
-    await asyncio.sleep(int(send_seconds))
 
     files = []
     for attachment in description_attachments:
         new_file = await attachment.to_file()
         files.append(new_file)
-    await create_quest_image(quest, delete_seconds, type_of_quest, files)
+    await create_quest_image(quest, delete_seconds, send_seconds, files)
 
 
 def add_eol(text, n):
@@ -386,18 +418,9 @@ def add_eol(text, n):
     return result
 
 
-async def create_quest_image(quest, delete_seconds, type_of_quest, files=None):
+async def create_quest_image(quest, delete_seconds, send_seconds, files=None):
     my_font = ImageFont.truetype("font.ttf", 100)
     img = None
-    match type_of_quest:
-        case "Дейлик":
-            img = Image.open('sprites/quest_templates/daily_quest_template')
-        case "Обычный":
-            img = Image.open('sprites/quest_templates/regular_quest_template')
-        case "Ивент":
-            img = Image.open('sprites/quest_templates/event_quest_template')
-    img_draw = ImageDraw.Draw(img)
-    fill_color = (59, 217, 161)
     result_text = ""
     result_text += f"> Название: {quest['title']}\n"
     if quest["people_limit"] is None:
@@ -414,28 +437,45 @@ async def create_quest_image(quest, delete_seconds, type_of_quest, files=None):
         else:
             result_text += f"> Время удаления: {quest_dt.strftime('До %H:%M %d.%m')}\n"
     result_text += f"> Описание: \n.. {add_eol(quest['description'], 40)}"
-    img_draw.text((500, 800), result_text, fill=fill_color, spacing=10, font=my_font)
-    last_quest_id = 0
-    while os.path.isfile(f"quest_{last_quest_id}.png"):
-        last_quest_id += 1
-    img.save(f"quest_{last_quest_id}.png")
-    img = discord.File(f"quest_{last_quest_id}.png")
+    quest_count = db.search(Query().type == "quest_count")[0]["value"]
     embed = Embed()
     if quest["people_limit"]:
         embed.add_field(name="Количество доступных мест", value=f"{quest['people_limit']}/{quest['people_limit']}")
     else:
         embed.add_field(name="Количество доступных мест", value="не ограничено")
-    local_quest_channel_id = db.search(Query().type == "quest_channel_id")[0]["value"]
-    local_quest_channel = bot.get_channel(local_quest_channel_id)
     new_view = QuestView(bot, [], quest["people_limit"], quest["people_limit"])
+    if "custom_id" not in quest.keys():
+        quest["custom_id"] = quest_count
+    quest["discord_id"] = None
+    if not db.search(Query().type == "quest" and Query().custom_id == quest["custom_id"]):
+        doc_id = db.insert(quest)
+    else:
+        doc_id = db.search(Query().type == "quest" and Query().custom_id == quest["custom_id"])[0].doc_id
+    quest_count += 1
+    db.update({"value": quest_count}, Query().type == "quest_count")
+    await asyncio.sleep(int(send_seconds))
+    local_quest_channel_id = db.search(Query().type == "quest_channel_id")[0]["value"]
+    local_quest_channel = await bot.fetch_channel(local_quest_channel_id)
+    match quest["type_of_quest"]:
+        case "Дейлик":
+            img = Image.open('sprites/quest_templates/daily_quest_template')
+        case "Обычный":
+            img = Image.open('sprites/quest_templates/regular_quest_template')
+        case "Ивент":
+            img = Image.open('sprites/quest_templates/event_quest_template')
+    img_draw = ImageDraw.Draw(img)
+    fill_color = (59, 217, 161)
+    img_draw.text((500, 800), result_text, fill=fill_color, spacing=10, font=my_font)
+    img.save(f"quest_{quest_count}.png")
+    img = discord.File(f"quest_{quest_count}.png")
     if files is None:
         files = [img]
     else:
         files.insert(0, img)
     message = await local_quest_channel.send(files=files, delete_after=delete_seconds, view=new_view, embed=embed)
-    quest["id"] = message.id
-    doc_id = db.insert(quest)
-    os.remove(f"quest_{last_quest_id}.png")
+    quest["discord_id"] = message.id
+    db.update({"discord_id": message.id}, Query().type == "quest" and Query().custom_id == quest["custom_id"])
+    os.remove(f"quest_{quest['custom_id']}.png")
     await asyncio.sleep(delete_seconds)
     await message.delete()
     db.remove(doc_ids=[doc_id])
@@ -445,10 +485,6 @@ async def create_quest_image(quest, delete_seconds, type_of_quest, files=None):
 @bot.command(name="confirm_quest")
 @commands.check(quest_keeper_level)
 async def confirm_quest(ctx, player_name, *, quest_title):
-    keeper_role = discord.utils.get(ctx.guild.roles, name="Quest keeper")
-    if not (keeper_role in ctx.author.roles):
-        await ctx.send("Sorry, this command is only for keepers")
-        return
     player = discord.utils.get(ctx.guild.members, name=player_name)
     if player is None:
         await ctx.send("Sorry, no such player is found")
@@ -463,7 +499,7 @@ async def confirm_quest(ctx, player_name, *, quest_title):
     # No need to remove the quest here, we do it in the on_raw_reaction_remove anyway
     await give_player_xp(ctx, player, quest_data["reward"])
     quest_channel_temp = await bot.fetch_channel(quest_channel_id)
-    message = await quest_channel_temp.fetch_message(quest_data["id"])
+    message = await quest_channel_temp.fetch_message(quest_data["discord_id"])
     player_member = await bot.fetch_user(player_profile["id"])
     player_profile["current_quests"].remove(message.id)
     db.update(player_profile, Query().id == player_profile["id"])
@@ -576,36 +612,37 @@ async def profile(ctx, other_name=""):
                   fill=fill_color, font=my_font)
     img_draw.text((700, 460), f"{titles[math.floor(author['level'] / 10)]}", fill=fill_color, font=my_font)
 
-    """
-    embed = discord.Embed()
-    embed.set_thumbnail(url=author_avatar)
-    embed.add_field(name="Пользователь: ", value=f"{author_name}")
-    embed.add_field(name="Уровень: ", value=f"{author['level']}")
-    embed.add_field(name="Звание: ", value=f"{titles[math.floor(author['level'] / 10)]}")
-    embed.add_field(name="Место в рейтинге: ", value=f"{calculate_player_rank(author['id'])}")
-    embed.add_field(name="Опыт: ", value=f"{author['exp']}/{author['level'] * 5 + 5}")
-    """
-
     s = "Нет активных заданий"
     to_be_removed_quests = []
     for quest_id in author["current_quests"][:min(len(author["current_quests"]), 8)]:
         if s == "Нет активных заданий":
             s = ""
-        quest = db.search(Query().id == quest_id)
+        quest = db.search(Query().discord_id == quest_id)
         quest_title = ""
         if quest:
             quest_title = quest[0]["title"]
+            s += f"> {quest_title}\n"
         else:
             to_be_removed_quests.append(quest_id)
-        s += f"> {quest_title}\n"
     for quest_id in to_be_removed_quests:
         author["current_quests"].remove(quest_id)
     if len(author["current_quests"]) >= 8:
         s += "> ..."
-    db.update({"current_quests": author["current_quests"]}, Query().id == author["id"])
-    # embed.add_field(name="Активные задания: ", value=s)
 
     img_draw.text((350, 950), s, fill=fill_color, font=my_font)
+
+    s = "Нет ачивок"
+    to_be_removed_quests = []
+    for achievement in author["achievements"][:min(len(author["achievements"]), 8)]:
+        if s == "Нет ачивок":
+            s = ""
+        s += f"> {achievement}\n"
+    if len(author["achievements"]) >= 8:
+        s += "> ..."
+
+    img_draw.text((350, 1800), s, fill=fill_color, font=my_font)
+
+    db.update({"current_quests": author["current_quests"]}, Query().id == author["id"])
 
     green_lights_count = math.floor((author['exp'] / (author['level'] * 5 + 5)) * 10)
 
@@ -621,5 +658,91 @@ async def profile(ctx, other_name=""):
 
     await ctx.send(file=img)
     os.remove("profile.png")
+
+
+@bot.command(name="text_profile")
+async def text_profile(ctx, other_name=""):
+    author = ctx.author
+    if other_name != "":
+        keeper_role = discord.utils.get(ctx.guild.roles, name="Quest keeper")
+        if not (keeper_role in ctx.author.roles):
+            await ctx.send("Sorry, only keeper can see other players profile")
+            return
+        player = discord.utils.get(ctx.guild.members, name=other_name)
+        if player is None:
+            await ctx.send("Sorry, no such player is found")
+            return
+        author = db.search(Query().id == player.id)[0]
+        if author is None:
+            await ctx.send("profile of this user is not created yet")
+            return
+        author_name = other_name
+        author_avatar = player.avatar
+    else:
+        for document in db.all():
+            if document["type"] == "player" and document["id"] == ctx.author.id:
+                author = document
+        if author is None:
+            add_player_to_db(ctx.author.id)
+            await profile(ctx)
+            return
+        author_name = ctx.author.name
+        author_avatar = ctx.author.avatar
+    embed = discord.Embed()
+    embed.set_thumbnail(url=author_avatar)
+    embed.add_field(name="Пользователь: ", value=f"{author_name}")
+    embed.add_field(name="Уровень: ", value=f"{author['level']}")
+    embed.add_field(name="Звание: ", value=f"{titles[math.floor(author['level']/10)]}")
+    embed.add_field(name="Место в рейтинге: ", value=f"{calculate_player_rank(author['id'])}")
+    embed.add_field(name="Опыт: ", value=f"{author['exp']}/{author['level'] * 5 + 5}")
+    to_be_removed_quests = []
+    s = "Нет активных заданий"
+    for quest_id in author["current_quests"]:
+        if s == "Нет активных заданий":
+            s = ""
+        quest = db.search(Query().discord_id == quest_id)
+        quest_title = ""
+        if quest:
+            quest_title = quest[0]["title"]
+            s += f"> {quest_title}\n"
+        else:
+            to_be_removed_quests.append(quest_id)
+    for quest_id in to_be_removed_quests:
+        author["current_quests"].remove(quest_id)
+
+    db.update({"current_quests": author["current_quests"]}, Query().id == author["id"])
+
+    embed.add_field(name="Активные задания: ", value=s)
+    s = "Нет ачивок"
+    for achievement in author["achievements"]:
+        if s == "Нет ачивок":
+            s = ""
+        s += f"{achievement}\n"
+    for quest_id in to_be_removed_quests:
+        author["current_quests"].remove(quest_id)
+
+    embed.add_field(name="Ачивки: ", value=s)
+    await ctx.send(embed=embed)
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    local_quest_channel = await bot.fetch_channel(payload.channel_id)
+    message = await local_quest_channel.fetch_message(payload.message_id)
+    ctx = await bot.get_context(message)
+    keeper_role = discord.utils.get(ctx.guild.roles, name="Quest keeper")
+    if keeper_role not in payload.member.roles:
+        return
+    quest_choices = list(map(int, re.split(", |,| ", message.content)))
+    member = db.search(Query().type == "player" and Query().id == message.author.id)[0]
+    quests = []
+    for quest_number in quest_choices:
+        quest = db.search(Query().type == "quest" and Query().discord_id == member["current_quests"][quest_number-1])[0]
+        quest_title = quest["title"]
+        quests.append(quest_title)
+    for quest_title in quests:
+        player = await bot.fetch_user(member["id"])
+        print(player.name, quest_title)
+        await confirm_quest(ctx, player.name, quest_title=quest_title)
 
 bot.run(TOKEN)
